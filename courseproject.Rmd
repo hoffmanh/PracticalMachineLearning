@@ -1,0 +1,136 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Haydn Hoffman"
+date: "2/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(caret)
+library(doParallel)
+```
+## Introduction
+Devices such as Jawbone Up, Nike FuelBand, and Fitbit can be used to easily 
+obtain data about personal activity. This data is usually used to quantify the 
+amount of activity one performed, but it may also be applied to determine how well 
+one is performing the activity. The goal of this report was to use data from 
+wearable sensors to determine whether or not barbell lifts were performed 
+correctly.
+
+## Import data
+
+Obtain and import data:
+```{r}
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+              "pml-training.csv")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+              "pml-testing.csv")
+training <- read.csv("pml-training.csv", na = c("", "NA"), stringsAsFactors = TRUE)
+testing <- read.csv("pml-testing.csv", na = c("", "NA"), stringsAsFactors = TRUE)
+```
+
+## Pre-processing
+
+There are numerous variables that contain mostly missing values. These
+variables contain only missing values in the testing dataset, so they will not
+be useful for the model. Thus, these variables are removed along with the 
+timestamps and user names:
+```{r}
+training <- training %>% 
+  select_if(function(col){sum(is.na(col)) < 1}) %>% 
+  select(roll_belt:classe)
+```
+
+First, identify and possibly remove variables with near-zero variance:
+```{r}
+nzv <- nearZeroVar(training[,-53], saveMetrics = TRUE)
+```
+
+None of the variables have near-zero variance, so none need to be removed.
+
+Next, identify and possibly remove correlated predictors:
+```{r}
+correlations <- cor(training[,-53])
+summary(correlations[upper.tri(correlations)])
+
+highly_correlated <- findCorrelation(correlations, cutoff = 0.75)
+training <- training[,-highly_correlated]
+```
+
+There were 21 highly correlated variables, which were removed.
+
+Finally, the data is centered and scaled:
+```{r}
+preprocess_vals <- preProcess(training, method = c("center", "scale"))
+training <- predict(preprocess_vals, training)
+```
+
+## Train models
+
+Various models are trained below. Resampling with k-folds cross validation 
+(k = 5) is used to estimate out-of-sample error and determine the best model.
+
+```{r, cache = TRUE}
+fit_control <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+set.seed(12345)
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+fit_tree <- train(classe ~ ., data = training, method = "rpart",
+                 trControl = fit_control)
+
+fit_svm <- train(classe ~ ., data = training, method = "svmLinear",
+                 trControl = fit_control)
+
+fit_rf <- train(classe ~., data = training, method = "rf",
+                 trControl = fit_control)
+
+fit_gbm <- train(classe ~ ., data = training, method = "gbm",
+                 trControl = fit_control, verbose = FALSE)
+```
+
+The in-sample accuracy for the classification tree model was only 53.4%. The 
+accuracy for the SVM model was 63.8%. The accuracy for the gbm model was 
+94.7%. The accuracy for the random forest model was 99.3%. The accuracy and 
+Kappa values are plotted below:
+
+```{r}
+resamps <- resamples(list(Tree = fit_tree,
+                          SVM = fit_svm,
+                          RandomForest = fit_rf,
+                          GBM = fit_gbm))
+
+theme1 <- trellis.par.get()
+theme1$plot.symbol$col = rgb(.2, .2, .2, .4)
+theme1$plot.symbol$pch = 16
+theme1$plot.line$col = rgb(1, 0, 0, .7)
+theme1$plot.line$lwd <- 2
+trellis.par.set(theme1)
+bwplot(resamps, layout = c(3, 1))
+```
+
+The high bias encountered with the simpler models (classification tree, linear 
+SVM) suggested a more complex model was required, which is why random forest and 
+stochastic gradient boosting were tried. The improved accuracy of these models 
+was statistically significant:
+
+```{r}
+difValues <- diff(resamps)
+summary(difValues)
+```
+
+## Prediction
+
+The random forest model is now used to predict classes on the testing set. The 
+expected out-of-sample error is greater than the in-sample error.
+```{r}
+predictions <- predict(fit_gbm, newdata = testing)
+```
+
+## Conclusion
+
+Whether or not a barbell lift was performed correctly was classified with high 
+in-sample accuracy. The random forest model yielded the greatest accuracy. This 
+model was then applied to the testing set.
